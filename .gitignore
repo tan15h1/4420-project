@@ -10,7 +10,4 @@ __pycache__/
 *.Rhistory
 bayesian_model.rds
 
-# Data — tracked via Git LFS (see .gitattributes)
-# If you are NOT using LFS, keep RAW_recipes.csv out of the repo
-# and download it from Kaggle instead (see README).
-RAW_recipes.csv
+# Data files are tracked via Git LFS (see .gitattributes)
