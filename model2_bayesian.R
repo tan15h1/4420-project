@@ -1,4 +1,4 @@
- ══════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════ # nolint: error.
 # DS 4420 Final Project — Model 2: Bayesian Logistic Regression
 # Tanishi Datta & Shruthi Palaniappan
 #
