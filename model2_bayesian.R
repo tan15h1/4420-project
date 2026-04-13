@@ -1,4 +1,4 @@
-══════════════════════════════════════════════════════════════════ # nolint: error.
+# ══════════════════════════════════════════════════════════════════
 # DS 4420 Final Project — Model 2: Bayesian Logistic Regression
 # Tanishi Datta & Shruthi Palaniappan
 #
@@ -246,11 +246,10 @@ cat("\n=== Posterior Summary ===\n")
 print(summary(bayes_model))
 
 # Posterior draws for coefficients
-post <- as_draws_df(bayes_model,
-                    variable = c("b_Intercept",
-                                 "b_cos_sim_z",
-                                 "b_ppmi_z",
-                                 "b_ctx_overlap_z"))
+post <- posterior_samples(bayes_model, pars = c("b_Intercept",
+                                                  "b_cos_sim_z",
+                                                  "b_ppmi_z",
+                                                  "b_ctx_overlap_z"))
 
 cat("\n=== 95% Credible Intervals (log-odds scale) ===\n")
 for (param in colnames(post)) {
