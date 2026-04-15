@@ -135,3 +135,8 @@ print(f"\nAfter cleaning: {len(recipes)} recipes")
 df = pd.DataFrame(recipes)
 df.to_pickle("recipes_clean.pkl")
 
+# also save as CSV so model2_bayesian.R can load it without reprocessing
+df["ingredients"] = df["ingredients"].apply(lambda x: "|".join(x))
+df["tags"]        = df["tags"].apply(lambda x: "|".join(x))
+df.to_csv("recipes_clean.csv", index=False)
+

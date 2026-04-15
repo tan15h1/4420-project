@@ -88,19 +88,22 @@ git lfs pull
 
 ---
 
-### Steps 2–4
+### Steps 2–5
 
 ```bash
-# 2. Run Model 1 (Python) — generates .npy / .csv / .txt artifacts
+# 2. Run preprocessing (Python) — cleans RAW_recipes.csv, saves recipes_clean.pkl and recipes_clean.csv
 pip install pandas numpy
+python preprocess.py
+
+# 3. Run Model 1 (Python) — requires recipes_clean.pkl, generates .npy / .csv / .txt artifacts
 python model1_collaborative_filtering.py
 
-# 3. Run Model 2 (R) — requires the artifacts from step 2
+# 4. Run Model 2 (R) — requires recipes_clean.csv and the artifacts from step 3
 # In R:
 # install.packages(c("brms", "dplyr", "ggplot2", "tidyr", "readr"))
 # source("model2_bayesian.R")
 
-# 4. Launch the Streamlit app
+# 5. Launch the Streamlit app
 pip install streamlit plotly
 streamlit run app.py
 ```
@@ -111,6 +114,7 @@ streamlit run app.py
 
 | File | Description |
 |------|-------------|
+| `preprocess.py` | Parses and cleans RAW_recipes.csv, outputs recipes_clean.pkl/.csv |
 | `model1_collaborative_filtering.py` | Model 1: PPMI + cosine similarity CF model |
 | `model2_bayesian.R` | Model 2: Bayesian logistic regression |
 | `app.py` | Streamlit interactive app |
