@@ -2,8 +2,8 @@
 DS 4420 Final Project - Model 1: Item-Based Collaborative Filtering
 Tanishi Datta & Shruthi Palaniappan
 
-Manual implementation (no sklearn or other modeling packages).
-Uses a recipe x ingredient binary rating matrix with PMI and cosine similarity
+Manual implementation
+Uses a recipe x ingredient rating matrix with PMI and cosine similarity
 to recommend ingredient substitutes given a partial recipe.
 
 Dataset: RAW_recipes.csv from Food.com (Kaggle)
@@ -11,94 +11,27 @@ Dataset: RAW_recipes.csv from Food.com (Kaggle)
 
 import pandas as pd
 import numpy as np
-import ast
 import random
 from collections import Counter
 
 # ──────────────────────────────────────────────
-# 1. DATA LOADING & PREPROCESSING
+# 1. DATA LOADING
 # ──────────────────────────────────────────────
+# Run preprocess.py first to generate recipes_clean.pkl
 
-print("Loading data...")
-# RAW_recipes.csv uses a non-standard format: each physical line is wrapped
-# in outer double-quotes, with multi-line descriptions spanning multiple lines.
-# Direct pd.read_csv mis-parses it, so we extract ingredient lists via regex.
-import re
+df = pd.read_pickle("recipes_clean.pkl")
 
-with open("RAW_recipes.csv", "rb") as _f:
-    _raw = _f.read()
-
-# Each complete record ends with: ""['ing1', 'ing2', ...]"",N"
-# where N is n_ingredients and the trailing " closes the outer-quoted row.
-_pattern = rb'""(\[[^\]]*\])"",(\d+)"'
-_matches = re.findall(_pattern, _raw)
-
-_ingredients_data = []
-for _ing_bytes, _n_bytes in _matches:
-    try:
-        _ing_str = _ing_bytes.decode("utf-8", errors="replace")
-        _ing_list = ast.literal_eval(_ing_str)
-        _n = int(_n_bytes)
-        if isinstance(_ing_list, list) and 1 <= _n <= 100 and len(_ing_list) == _n:
-            _ingredients_data.append(_ing_list)
-    except (ValueError, SyntaxError):
-        pass
-
-df = pd.DataFrame({"ingredients": _ingredients_data})
-print(f"  Raw records extracted: {len(df)}")
-_n = len(df)
-
-# ── Cleaning pipeline ──────────────────────────────────────────────────────
-
-# 1. Drop rows where the ingredient list is null or empty
-df = df.dropna(subset=["ingredients"])
-df = df[df["ingredients"].apply(lambda x: len(x) > 0)].reset_index(drop=True)
-print(f"  Step 1 – drop null/empty lists:       removed {_n - len(df):>5}, {len(df)} remaining")
-_n = len(df)
-
-# 2. Remove garbled rows: any ingredient containing a tab character.
-#    These appear as 'por\tk spare\tribs' or 'fres\th ga\trl\tic' and are
-#    artifacts of the non-standard CSV encoding.
-df = df[~df["ingredients"].apply(
-    lambda ings: any("\t" in ing for ing in ings)
-)].reset_index(drop=True)
-print(f"  Step 2 – drop tab-garbled rows:       removed {_n - len(df):>5}, {len(df)} remaining")
-_n = len(df)
-
-# 3. Per-entry cleaning within each ingredient list:
-#    - strip whitespace and lowercase
-#    - drop empty strings and lone-punctuation entries
-#    - drop purely numeric tokens (e.g. '1', '42') — not real ingredient names
-def _clean_list(ings):
-    cleaned = []
-    for ing in ings:
-        ing = ing.strip().lower()
-        if len(ing) > 1 and any(c.isalpha() for c in ing):
-            cleaned.append(ing)
-    return cleaned
-
-df["ingredients"] = df["ingredients"].apply(_clean_list)
-print(f"  Step 3 – strip/lowercase/drop numeric: {len(df)} rows (entries cleaned in-place)")
-
-# 4. Remove recipes with fewer than 3 usable ingredients after per-entry cleaning
-df = df[df["ingredients"].apply(len) >= 3].reset_index(drop=True)
-print(f"  Step 4 – require ≥3 ingredients:      removed {_n - len(df):>5}, {len(df)} remaining")
-_n = len(df)
-
-# 5. Deduplicate: drop recipes whose ingredient sets are identical
-df["_ing_key"] = df["ingredients"].apply(lambda x: frozenset(x))
-df = df.drop_duplicates(subset=["_ing_key"]).drop(columns=["_ing_key"]).reset_index(drop=True)
-print(f"  Step 5 – deduplicate by ingredient set: removed {_n - len(df):>5}, {len(df)} remaining")
-
-print(f"  ── After cleaning: {len(df)} recipes ──")
-
-# Sample for tractability
+# Sample down from ~170,000 to 20,000 recipes
 df = df.sample(n=min(20_000, len(df)), random_state=42).reset_index(drop=True)
 
-# Build vocabulary: keep ingredients appearing in >= 20 recipes
-ingredient_counts = Counter(ing for recipe in df["ingredients"] for ing in recipe)
-vocab = [ing for ing, cnt in ingredient_counts.items() if cnt >= 20]
-ing2idx = {ing: idx for idx, ing in enumerate(vocab)}
+# Build vocabulary - keep ingredients that appear in at least 20 recipes
+ingredient_counts = Counter()
+for recipe in df["ingredients"]:
+    for i in recipe:
+        ingredient_counts[i] += 1
+
+vocab = [i for i, cnt in ingredient_counts.items() if cnt >= 20]
+ing2idx = {i: idx for idx, i in enumerate(vocab)}
 V = len(vocab)
 print(f"Vocabulary size: {V} ingredients | Recipes: {len(df)}")
 
@@ -107,7 +40,6 @@ print(f"Vocabulary size: {V} ingredients | Recipes: {len(df)}")
 # ──────────────────────────────────────────────
 # Binary: R[recipe_i, ing_j] = 1 if ingredient j appears in recipe i
 
-print("Building rating matrix...")
 R = np.zeros((len(df), V), dtype=np.float32)
 for row_idx, row in df.iterrows():
     for ing in row["ingredients"]:
@@ -115,166 +47,197 @@ for row_idx, row in df.iterrows():
             R[row_idx, ing2idx[ing]] = 1.0
 
 # ──────────────────────────────────────────────
-# 3. PMI SIMILARITY (MANUAL)
+# 3. PPMI SIMILARITY
 # ──────────────────────────────────────────────
-# PMI(i, j) = log[ P(i,j) / (P(i) * P(j)) ]
-# P(i,j) = number of recipes containing both i and j / total recipes
-# P(i)   = number of recipes containing i / total recipes
-# We clamp to PPMI (positive PMI only)
+# PMI(i, j) = log( P(i,j) / (P(i) * P(j)) )
+n = len(df)
 
-print("Computing PMI similarity matrix (this may take a minute)...")
-N = len(df)
-freq_i = R.sum(axis=0)           # shape (V,)  — how many recipes each ingredient appears in
-co_occ = R.T @ R                  # shape (V, V) — co-occurrence counts (matrix multiply)
+# How often each ingredient appears across all recipes
+freq = R.sum(axis=0)
+p_i = freq / n
 
-p_i = freq_i / N                  # marginal probabilities
-p_ij = co_occ / N                 # joint probabilities
+# How often each pair of ingredients appears together
+# R.T @ R gives a V x V matrix 
+co_occ = R.T @ R
+p_ij = co_occ / n
 
-# PPMI: max(log(P(i,j) / P(i)*P(j)), 0)
-# Avoid log(0): mask zero entries
-with np.errstate(divide="ignore", invalid="ignore"):
-    outer = np.outer(p_i, p_i)   # P(i)*P(j) for all pairs
-    pmi = np.where(
-        (p_ij > 0) & (outer > 0),
-        np.log(np.where(outer > 0, p_ij / outer, 1.0)),
-        0.0
-    )
-ppmi = np.maximum(pmi, 0).astype(np.float32)
+pmi = np.log((p_ij + 1e-10) / (np.outer(p_i, p_i) + 1e-10))
+
+# Keep only positive pmi values
+ppmi = np.maximum(pmi, 0)
 
 # ──────────────────────────────────────────────
-# 4. COSINE SIMILARITY ON PPMI VECTORS (MANUAL)
+# 4. COSINE SIMILARITY ON PPMI VECTORS
 # ──────────────────────────────────────────────
-# Each ingredient is represented by its row in the PPMI matrix.
-# cos_sim[i, j] = dot(ppmi[i], ppmi[j]) / (||ppmi[i]|| * ||ppmi[j]||)
+# cos_sim[i, j] = i * j / (||i|| x ||j||)
+# Normalize each row to unit length 
+# then dot product gives all pairwise cosines
 
-print("Computing cosine similarity...")
-norms = np.linalg.norm(ppmi, axis=1, keepdims=True)  # shape (V, 1)
-norms[norms == 0] = 1e-10  # avoid division by zero
-ppmi_normed = ppmi / norms
-cos_sim = ppmi_normed @ ppmi_normed.T   # shape (V, V)
+norms = np.linalg.norm(ppmi, axis=1)
+norms[norms == 0] = 1e-10
+
+ppmi_normed = ppmi / norms.reshape(-1, 1)
+cos_sim = ppmi_normed @ ppmi_normed.T
 
 # ──────────────────────────────────────────────
-# 5. INGREDIENT SUBSTITUTION FUNCTION
+# 5. TAG-INGREDIENT co-occurrence matrix
 # ──────────────────────────────────────────────
+# Build tag vocabulary - keep tags that appear in at least 20 recipes
+tag_counts = Counter()
+for tags in df["tags"]:
+    for tag in tags:
+        tag_counts[tag] += 1
 
-def get_substitutes(target_ingredient: str, context: list[str], top_n: int = 5) -> list[tuple]:
-    """
-    Recommend top_n substitutes for target_ingredient given a list of context ingredients.
+tag_vocab = [t for t, cnt in tag_counts.items() if cnt >= 20]
+tag2idx = {t: idx for idx, t in enumerate(tag_vocab)}
+T = len(tag_vocab)
+print(f"Tag vocabulary: {T} tags")
 
-    Scoring (weighted combination):
-      - 60% cosine similarity between target and candidate (PPMI vectors)
-      - 40% mean PPMI affinity between candidate and context ingredients
-        (measures how well the candidate fits the existing recipe context)
+# tag_ing[t, i] = number of recipes that have both tag t and ingredient i
+tag_ing = np.zeros((T, V), dtype=np.float32)
+for _, row in df.iterrows():
+    for tag in row["tags"]:
+        if tag in tag2idx:
+            for ing in row["ingredients"]:
+                if ing in ing2idx:
+                    tag_ing[tag2idx[tag], ing2idx[ing]] += 1
 
-    Parameters
-    ----------
-    target_ingredient : str
-    context           : list of other ingredients in the recipe
-    top_n             : number of substitutes to return
+# Compute tag-ingredient PPMI
+# p_i is already computed in section 3 (ingredient marginal probabilities)
+p_tag = tag_ing.sum(axis=1) / len(df)
+p_tag_ing = tag_ing / len(df)
 
-    Returns
-    -------
-    List of (ingredient, score) tuples, sorted descending by score.
-    """
+tag_ing_ppmi = np.log((p_tag_ing + 1e-10) / (np.outer(p_tag, p_i) + 1e-10))
+tag_ing_ppmi = np.maximum(tag_ing_ppmi, 0)
+
+# ──────────────────────────────────────────────
+# 6. INGREDIENT SUBSTITUTION FUNCTION
+# ──────────────────────────────────────────────
+def get_substitutes(target_ingredient, context_ingredients, recipe_tags=None, top_n=5):
     if target_ingredient not in ing2idx:
-        print(f"  '{target_ingredient}' not in vocabulary.")
+        print(f"'{target_ingredient}' not in vocabulary.")
         return []
-    
-    target_idx   = ing2idx[target_ingredient]
-    context_idxs = [ing2idx[i] for i in context if i in ing2idx]
-    
+
+    target_idx = ing2idx[target_ingredient]
+    context_idxs = [ing2idx[i] for i in context_ingredients if i in ing2idx]
+    tag_idxs = [tag2idx[t] for t in (recipe_tags or []) if t in tag2idx]
+
     scores = {}
     for ing, idx in ing2idx.items():
-        if ing == target_ingredient or ing in context:
+        # skip the target itself and anything already in the recipe
+        if ing == target_ingredient or ing in context_ingredients:
             continue
-        
-        sim_score = float(cos_sim[target_idx, idx])
-        
-        if context_idxs:
-            context_score = float(np.mean(ppmi[idx, context_idxs]))
-        else:
-            context_score = 0.0
-        
-        scores[ing] = 0.6 * sim_score + 0.4 * context_score
-    
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
+        # how similar is the candidate to the target ingredient
+        sim_score = float(cos_sim[target_idx, idx])
+
+        # how well does the candidate fit the rest of the recipe (context)
+        context_score = float(np.mean(ppmi[idx, context_idxs])) if context_idxs else 0.0
+
+        # how well does the candidate fit the recipe's tags
+        tag_score = float(np.mean(tag_ing_ppmi[tag_idxs, idx])) if tag_idxs else 0.0
+
+        # penalty if candidate clashes with the target
+        pmi_penalty = min(float(pmi[target_idx, idx]), 0)
+
+        scores[ing] = 0.5 * sim_score + 0.3 * context_score + 0.2 * tag_score + pmi_penalty
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return ranked[:top_n]
 
 # ──────────────────────────────────────────────
 # 6. EVALUATION
 # ──────────────────────────────────────────────
-# Leave-one-out: for each recipe, remove one ingredient at random,
-# try to predict it from the remaining context.
-#
-# Since there's no canonical ground-truth "substitute" list,
-# we use a proxy: check whether the prediction is among the
-# top-20 nearest neighbours of the held-out ingredient in PPMI space.
-#
-# Metrics:
-#   Hit@5  — is any of the top-5 predictions a near-neighbour?
-#   MRR    — mean reciprocal rank of the first near-neighbour hit
-
-print("\nRunning evaluation (leave-one-out, n=300)...")
 random.seed(99)
 
-eval_recipes = df[df["ingredients"].apply(
-    lambda x: sum(1 for i in x if i in ing2idx) >= 4
-)].sample(n=300, random_state=99)
+# Collect recipes with at least 4 known ingredients
+valid_recipes = []
+for _, row in df.iterrows():
+    known = [i for i in row["ingredients"] if i in ing2idx]
+    if len(known) >= 4:
+        valid_recipes.append(row)
+
+eval_recipes = random.sample(valid_recipes, 300)
+
+# ── Evaluation 1: Ingredient recovery ─────────────────────────────────────
+# Hide one ingredient from each recipe and 
+# score all vocab ingredients by how well they fit the remaining context 
+
+# Metrics:
+# Exact Hit@5 - did the missing ingredient appear in our top 5?
+# Mean cos sim - how similar was our top prediction to the missing ingredient?
 
 hits_at_5 = 0
-mrr_total = 0.0
-eval_count = 0
+total_similarity = 0.0
 
-for _, row in eval_recipes.iterrows():
+for row in eval_recipes:
     recipe = [i for i in row["ingredients"] if i in ing2idx]
-    if len(recipe) < 4:
-        continue
-    
+
     missing = random.choice(recipe)
     partial = [i for i in recipe if i != missing]
+    partial_idxs = [ing2idx[i] for i in partial]
     missing_idx = ing2idx[missing]
-    
-    # Top-20 nearest neighbours of missing ingredient (proxy ground truth)
-    sim_scores = cos_sim[missing_idx].copy()
-    sim_scores[missing_idx] = -1.0
-    top20_neighbors = set(vocab[i] for i in np.argsort(sim_scores)[-20:])
-    
-    preds = [p[0] for p in get_substitutes(missing, partial, top_n=5)]
-    
-    if any(p in top20_neighbors for p in preds):
-        hits_at_5 += 1
-    
-    for rank, p in enumerate(preds, start=1):
-        if p in top20_neighbors:
-            mrr_total += 1.0 / rank
-            break
-    
-    eval_count += 1
 
-print(f"Evaluation on {eval_count} recipes:")
-print(f"  Hit@5 : {hits_at_5 / eval_count:.3f}")
-print(f"  MRR   : {mrr_total / eval_count:.3f}")
+    # Score every ingredient by how well it fits the context
+    scores = {}
+    for ing, idx in ing2idx.items():
+        if ing in partial:
+            continue
+        scores[ing] = float(np.mean(ppmi[idx, partial_idxs]))
+
+    top5 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:5]
+    top5_names = [t[0] for t in top5]
+
+    if missing in top5_names:
+        hits_at_5 += 1
+
+    if top5_names:
+        top_pred_idx = ing2idx[top5_names[0]]
+        total_similarity += cos_sim[missing_idx, top_pred_idx]
+
+print(f"  Exact Hit@5: {hits_at_5 / len(eval_recipes):.3f}")
+print(f"  Mean cosine similarity: {total_similarity / len(eval_recipes):.3f}")
+
+# ── Evaluation 2: Substitution quality ────────────────────────────────────
+# Call get_substitutes directly and measure how similar the returned substitutes 
+# are to the target ingredient using cosine similarity
+total_sim = 0.0
+count = 0
+
+for row in eval_recipes:
+    recipe = [i for i in row["ingredients"] if i in ing2idx]
+    if len(recipe) < 2:
+        continue
+
+    target = random.choice(recipe)
+    context = [i for i in recipe if i != target]
+    target_idx = ing2idx[target]
+
+    subs = get_substitutes(target, context, top_n=5)
+    for sub, _ in subs:
+        total_sim += cos_sim[target_idx, ing2idx[sub]]
+        count += 1
+
+print(f"  Mean cosine similarity (substitutes vs target): {total_sim / count:.3f}")
 
 # ──────────────────────────────────────────────
 # 7. DEMO
 # ──────────────────────────────────────────────
 
 demo_cases = [
-    ("butter",        ["flour", "sugar", "eggs", "vanilla extract"]),
-    ("soy sauce",     ["garlic", "ginger", "sesame oil", "rice"]),
-    ("heavy cream",   ["onion", "garlic", "pasta", "parmesan cheese"]),
-    ("eggs",          ["flour", "sugar", "butter", "baking powder"]),
-    ("olive oil",     ["garlic", "tomatoes", "basil", "pasta"]),
+    ("butter",      ["flour", "sugar", "eggs", "vanilla extract"], ["desserts", "cakes"]),
+    ("soy sauce",   ["garlic", "ginger", "sesame oil", "rice"],    ["asian", "chinese"]),
+    ("heavy cream", ["onion", "garlic", "pasta", "parmesan cheese"], ["italian", "pasta"]),
+    ("eggs",        ["flour", "sugar", "butter", "baking powder"], ["baking", "desserts"]),
+    ("olive oil",   ["garlic", "tomatoes", "basil", "pasta"],      ["italian", "mediterranean"]),
 ]
 
-print("\n" + "="*55)
-print("DEMO: Top-5 substitutes")
-print("="*55)
-for target, context in demo_cases:
-    subs = get_substitutes(target, context, top_n=5)
-    print(f"\nSubstitutes for '{target}' in context {context}:")
+print("\nDEMO: Top-5 substitutes")
+for target, context, tags in demo_cases:
+    subs = get_substitutes(target, context, recipe_tags=tags, top_n=5)
+    print(f"\nSubstitutes for '{target}' (tags: {tags}):")
     for ing, score in subs:
-        print(f"  {ing:<32} {score:.4f}")
+        print(f"  {ing} ({score:.4f})")
 
 
 # ──────────────────────────────────────────────
