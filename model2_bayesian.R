@@ -1,21 +1,20 @@
 # DS 4420 Final Project - Model 2: Bayesian Logistic Regression
 # Tanishi Datta & Shruthi Palaniappan
 #
-# Fits a Bayesian logistic regression to predict whether ingredient B
-# is a good substitute for ingredient A given recipe context.
-# Requires outputs from model1_collaborative_filtering.py.
+# Uses outputs from model1_collaborative_filtering.py to fit a Bayesian
+# logistic regression that predicts whether ingredient B is a good
+# substitute for ingredient A given the recipe context.
 
 library(brms)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-library(readr)
-
 set.seed(4420)
 
 # ──────────────────────────────────────────────
 # 1. LOAD PRECOMPUTED DATA
 # ──────────────────────────────────────────────
+# Run model1_collaborative_filtering.py first to generate these files
 
 vocab   <- readLines("vocab_top1000.txt")
 V       <- length(vocab)
@@ -24,50 +23,42 @@ ing2idx <- setNames(seq_along(vocab), vocab)
 cos_mat  <- as.matrix(read.csv("cos_sim_top1000.csv",  header = FALSE))
 ppmi_mat <- as.matrix(read.csv("ppmi_top1000.csv",     header = FALSE))
 
-cat("Vocabulary size:", V, "\n")
+cat(sprintf("Vocabulary size: %d ingredients\n", V))
 
 # ──────────────────────────────────────────────
-# 2. LOAD CLEANED DATA
+# 2. BUILD TRAINING PAIRS
 # ──────────────────────────────────────────────
-# preprocess.py already cleaned RAW_recipes.csv and saved recipes_clean.csv
-# ingredients and tags are pipe-separated strings, split them back into lists
-
-recipes_df <- read.csv("recipes_clean.csv", stringsAsFactors = FALSE)
-recipes_df$ingredients <- strsplit(recipes_df$ingredients, "\\|")
-recipes_df$tags        <- strsplit(recipes_df$tags, "\\|")
-
-cat("Recipes loaded:", nrow(recipes_df), "\n")
-
-# ──────────────────────────────────────────────
-# 3. BUILD TRAINING PAIRS
-# ──────────────────────────────────────────────
-# Features per (target, candidate) pair:
+# Sample 150 target ingredients, 35 candidates each (~5250 pairs)
+# For each pair compute 3 features:
 #   cos_sim     - cosine similarity between target and candidate
 #   ppmi        - PPMI score between target and candidate
-#   ctx_overlap - mean PPMI between candidate and target's top-5 neighbors
-# Label = 1 if candidate is in the top-20 PPMI neighbors of target
+#   ctx_overlap - how well candidate fits the target's top-5 neighbors
+# Label = 1 if candidate is in top-20 most similar ingredients to target
 
 n_targets    <- 150
 n_candidates <- 35
-targets      <- sample(vocab, n_targets)
+target_ings  <- sample(vocab, n_targets)
 
 rows <- list()
-for (t in targets) {
-  t_idx <- ing2idx[[t]]
-  sims  <- cos_mat[t_idx, ]
-  sims[t_idx] <- -1
-  top20 <- order(sims, decreasing = TRUE)[1:20]
-  top5  <- order(cos_mat[t_idx, ], decreasing = TRUE)[2:6]
-  cands <- sample(setdiff(seq_len(V), t_idx), n_candidates)
+for (target in target_ings) {
+  target_idx <- ing2idx[[target]]
 
-  for (c_idx in cands) {
+  # find top-20 neighbors (positive class) and top-5 for context
+  sim_scores             <- cos_mat[target_idx, ]
+  sim_scores[target_idx] <- -1
+  top20_neighbors <- order(sim_scores, decreasing = TRUE)[1:20]
+  top5_neighbors  <- order(cos_mat[target_idx, ], decreasing = TRUE)[2:6]
+
+  candidates <- sample(setdiff(seq_len(V), target_idx), n_candidates)
+
+  for (cand_idx in candidates) {
     rows[[length(rows) + 1]] <- data.frame(
-      target      = t,
-      candidate   = vocab[c_idx],
-      cos_sim     = cos_mat[t_idx, c_idx],
-      ppmi        = ppmi_mat[t_idx, c_idx],
-      ctx_overlap = mean(ppmi_mat[c_idx, top5]),
-      label       = as.integer(c_idx %in% top20),
+      target      = target,
+      candidate   = vocab[cand_idx],
+      cos_sim     = cos_mat[target_idx, cand_idx],
+      ppmi        = ppmi_mat[target_idx, cand_idx],
+      ctx_overlap = mean(ppmi_mat[cand_idx, top5_neighbors]),
+      label       = as.integer(cand_idx %in% top20_neighbors),
       stringsAsFactors = FALSE
     )
   }
@@ -77,12 +68,13 @@ train_df <- bind_rows(rows) %>%
   filter(!is.na(cos_sim), !is.na(ppmi), !is.na(ctx_overlap)) %>%
   distinct(target, candidate, .keep_all = TRUE)
 
-cat("Training pairs:", nrow(train_df), "\n")
-cat("Positive rate:", mean(train_df$label), "\n")
+cat(sprintf("Training pairs: %d\n", nrow(train_df)))
+cat(sprintf("Positive rate: %.4f\n", mean(train_df$label)))
 
 # ──────────────────────────────────────────────
-# 4. FEATURE SCALING
+# 3. FEATURE SCALING
 # ──────────────────────────────────────────────
+# Z-score each feature so they are on the same scale before fitting
 
 train_df <- train_df %>%
   mutate(
@@ -93,15 +85,16 @@ train_df <- train_df %>%
   select(-cos_sim, -ppmi, -ctx_overlap)
 
 # ──────────────────────────────────────────────
-# 5. BAYESIAN LOGISTIC REGRESSION
+# 4. BAYESIAN LOGISTIC REGRESSION
 # ──────────────────────────────────────────────
+# student_t on intercept (fat tails for logistic regression baseline)
+# Normal(0, 2) on slopes - weakly informative, discourages extreme values
 
-# Check defaults first
 default_prior(label ~ cos_sim_z + ppmi_z + ctx_overlap_z,
               data   = train_df,
               family = bernoulli("logit"))
 
-manual_prior <- c(
+priors <- c(
   prior(student_t(4, 0, 10), class = "Intercept"),
   prior(normal(0, 2), class = b, coef = cos_sim_z),
   prior(normal(0, 2), class = b, coef = ppmi_z),
@@ -118,32 +111,43 @@ model <- brm(
   iter    = 1000,
   warmup  = 180,
   cores   = getOption("mc.cores", 1),
-  prior   = manual_prior,
+  prior   = priors,
   seed    = 4420
 )
 
 # ──────────────────────────────────────────────
-# 6. EVALUATION
+# 5. EVALUATION
 # ──────────────────────────────────────────────
 
 summary(model)
-plot(model) # posterior distributions + chains for convergence
+plot(model) # trace plots - check chains mixed well (fuzzy caterpillar shape)
 
-post_draws <- as.data.frame(model)
+# extract all posterior samples as a dataframe (one row per MCMC draw)
+posterior <- as.data.frame(model)
 
+# check ACF plots to see if chains are mixing well - same as class
+# want autocorrelation to drop off quickly, close to 0 after a few lags
+acf(posterior[, "b_cos_sim_z"],     main = "ACF - Cosine Similarity")
+acf(posterior[, "b_ppmi_z"],        main = "ACF - PPMI Score")
+acf(posterior[, "b_ctx_overlap_z"], main = "ACF - Context Overlap")
+
+# 95% credible intervals for each coefficient
 cat("\n=== 95% Credible Intervals ===\n")
-for (col in c("b_Intercept", "b_cos_sim_z", "b_ppmi_z", "b_ctx_overlap_z")) {
-  q <- quantile(post_draws[[col]], c(0.025, 0.5, 0.975))
-  cat(sprintf("  %-25s  median=%.3f  95%% CI=[%.3f, %.3f]\n", col, q[2], q[1], q[3]))
+for (param in c("b_Intercept", "b_cos_sim_z", "b_ppmi_z", "b_ctx_overlap_z")) {
+  q <- quantile(posterior[[param]], c(0.025, 0.5, 0.975))
+  cat(sprintf("  %-25s  median=%.3f  95%% CI=[%.3f, %.3f]\n", param, q[2], q[1], q[3]))
 }
 
-# In-sample posterior predictive check
-post_preds <- posterior_predict(model)
-pred_prob  <- colMeans(post_preds)
-pred_label <- as.integer(pred_prob >= 0.5)
-cat(sprintf("\nIn-sample accuracy (threshold=0.5): %.3f\n", mean(pred_label == train_df$label)))
+# predicted probability for each training pair
+post_preds   <- posterior_predict(model)
+pred_probs   <- colMeans(post_preds)
+pred_labels  <- as.integer(pred_probs >= 0.5)
+total_correct <- sum(pred_labels == train_df$label)
 
-# AUC via trapezoidal integration
+cat(sprintf("\nIn-sample accuracy: %d / %d = %.3f\n",
+            total_correct, nrow(train_df), total_correct / nrow(train_df)))
+
+# AUC via trapezoidal integration (no external packages)
 compute_auc <- function(labels, scores) {
   ord    <- order(scores, decreasing = TRUE)
   labels <- labels[ord]
@@ -154,21 +158,23 @@ compute_auc <- function(labels, scores) {
   sum(diff(fpr) * (head(tpr, -1) + tail(tpr, -1))) / 2
 }
 
-cat(sprintf("In-sample AUC: %.3f\n", compute_auc(train_df$label, pred_prob)))
+total_auc <- compute_auc(train_df$label, pred_probs)
+cat(sprintf("In-sample AUC: %.3f\n", total_auc))
 
 cat("\nComputing LOO-CV...\n")
 print(loo(model))
 
-# Visualize how each feature affects substitution probability
+# how each feature independently affects predicted substitution probability
 plot(conditional_effects(model, "cos_sim_z"))
 plot(conditional_effects(model, "ppmi_z"))
 plot(conditional_effects(model, "ctx_overlap_z"))
 
 # ──────────────────────────────────────────────
-# 7. PLOTS
+# 6. PLOTS
 # ──────────────────────────────────────────────
 
-post_long <- post_draws %>%
+# reshape posterior samples into long format for plotting
+post_long <- posterior %>%
   select(b_Intercept, b_cos_sim_z, b_ppmi_z, b_ctx_overlap_z) %>%
   pivot_longer(everything(), names_to = "parameter", values_to = "value") %>%
   mutate(parameter = recode(parameter,
@@ -178,93 +184,156 @@ post_long <- post_draws %>%
     "b_ctx_overlap_z" = "Context Overlap"
   ))
 
+# Plot 1: posterior distributions of each coefficient
+# dashed line at 0 - if the whole distribution is to the right, that feature matters
 p1 <- ggplot(post_long, aes(x = value, fill = parameter)) +
   geom_density(alpha = 0.7, color = NA) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
   facet_wrap(~parameter, scales = "free", ncol = 2) +
   scale_fill_manual(values = c("#E07A5F", "#3D405B", "#81B29A", "#F2CC8F")) +
   labs(title = "Posterior Distributions of Model Coefficients",
+       subtitle = "Distributions entirely right of 0 indicate a positive predictor of substitutability",
        x = "Log-Odds", y = "Density") +
   theme_minimal(base_size = 13) +
-  theme(legend.position = "none", plot.title = element_text(face = "bold"))
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"),
+        plot.subtitle = element_text(size = 10, color = "gray40"))
 
 ggsave("plot_posterior_coefficients.png", p1, width = 8, height = 5, dpi = 150)
 cat("Saved: plot_posterior_coefficients.png\n")
 
-train_df$pred_prob <- pred_prob
-p2 <- ggplot(train_df, aes(x = pred_prob, fill = factor(label))) +
+# Plot 2: ROC curve - shows how well the model separates substitutes from non-substitutes
+# area under the curve = AUC (closer to 1.0 = better)
+train_df$pred_prob <- pred_probs
+
+ord    <- order(pred_probs, decreasing = TRUE)
+labels <- train_df$label[ord]
+n_pos  <- sum(labels)
+n_neg  <- length(labels) - n_pos
+tpr    <- c(0, cumsum(labels) / n_pos)       # true positive rate
+fpr    <- c(0, cumsum(1 - labels) / n_neg)   # false positive rate
+
+roc_df <- data.frame(fpr = fpr, tpr = tpr)
+
+p2 <- ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(color = "#81B29A", linewidth = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray60") +
+  annotate("text", x = 0.75, y = 0.15,
+           label = sprintf("AUC = %.3f", total_auc),
+           size = 5, color = "#3D405B") +
+  annotate("text", x = 0.63, y = 0.57,
+           label = "Random guessing", size = 3.5, color = "gray50", angle = 34) +
+  labs(title = "ROC Curve — Bayesian Logistic Regression",
+       x = "False Positive Rate", y = "True Positive Rate") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("plot_roc_curve.png", p2, width = 6, height = 6, dpi = 150)
+cat("Saved: plot_roc_curve.png\n")
+
+# Plot 3: predicted probability by label (boxplot)
+p3 <- ggplot(train_df, aes(x = factor(label), y = pred_prob, fill = factor(label))) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.2) +
+  scale_fill_manual(values = c("#E07A5F", "#81B29A"),
+                    labels = c("Non-substitute", "Substitute"),
+                    name = "Label") +
+  scale_x_discrete(labels = c("Non-substitute", "Substitute")) +
+  labs(title = "Predicted Substitution Probability by Label",
+       x = "", y = "Predicted Probability") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+ggsave("plot_predicted_probs.png", p3, width = 8, height = 5, dpi = 150)
+cat("Saved: plot_predicted_probs.png\n")
+
+# Plot 4: predicted probability histogram by label
+p4 <- ggplot(train_df, aes(x = pred_prob, fill = factor(label))) +
   geom_histogram(bins = 40, alpha = 0.75, position = "identity") +
   scale_fill_manual(values = c("#E07A5F", "#81B29A"),
-                    labels = c("Non-substitute", "Near-neighbor substitute"),
+                    labels = c("Non-substitute", "Substitute"),
                     name = "Label") +
   labs(title = "Posterior Predicted Probabilities by Label",
        x = "Predicted Probability", y = "Count") +
   theme_minimal(base_size = 13) +
   theme(plot.title = element_text(face = "bold"))
 
-ggsave("plot_predicted_probs.png", p2, width = 8, height = 4.5, dpi = 150)
-cat("Saved: plot_predicted_probs.png\n")
+ggsave("plot_predicted_histogram.png", p4, width = 8, height = 5, dpi = 150)
+cat("Saved: plot_predicted_histogram.png\n")
 
 # ──────────────────────────────────────────────
-# 8. SUBSTITUTION FUNCTION
+# 7. SUBSTITUTION FUNCTION
 # ──────────────────────────────────────────────
 
-sigmoid <- function(w, x) {
-  1 / (1 + exp(-t(w) %*% x))
+sigmoid <- function(x) {
+  1 / (1 + exp(-x))
 }
 
-get_substitutes <- function(target, context, top_n = 5) {
-  if (!(target %in% vocab)) {
-    cat("Ingredient not in vocabulary:", target, "\n")
+get_substitutes <- function(target_ingredient, context_ingredients, top_n = 5) {
+  if (!(target_ingredient %in% vocab)) {
+    cat("Ingredient not in vocabulary:", target_ingredient, "\n")
     return(NULL)
   }
 
-  t_idx <- ing2idx[[target]]
-  top5  <- order(cos_mat[t_idx, ], decreasing = TRUE)[2:6]
-  cands <- setdiff(vocab, c(target, context))
+  target_idx     <- ing2idx[[target_ingredient]]
+  top5_neighbors <- order(cos_mat[target_idx, ], decreasing = TRUE)[2:6]
+  candidates     <- setdiff(vocab, c(target_ingredient, context_ingredients))
 
-  # Scale features using training set parameters
-  raw_cos  <- cos_mat[t_idx, ing2idx[cands]]
-  raw_ppmi <- ppmi_mat[t_idx, ing2idx[cands]]
-  raw_ctx  <- sapply(ing2idx[cands], function(i) mean(ppmi_mat[i, top5]))
+  # compute features for every candidate
+  raw_cos_sim     <- cos_mat[target_idx, ing2idx[candidates]]
+  raw_ppmi        <- ppmi_mat[target_idx, ing2idx[candidates]]
+  raw_ctx_overlap <- sapply(ing2idx[candidates], function(i) mean(ppmi_mat[i, top5_neighbors]))
 
-  feat_df <- data.frame(
-    candidate     = cands,
-    cos_sim_z     = scale(raw_cos)[,1],
+  cand_df <- data.frame(
+    candidate     = candidates,
+    cos_sim_z     = scale(raw_cos_sim)[,1],
     ppmi_z        = scale(raw_ppmi)[,1],
-    ctx_overlap_z = scale(raw_ctx)[,1]
+    ctx_overlap_z = scale(raw_ctx_overlap)[,1]
   )
 
-  # for each candidate, average sigmoid over all posterior draws
-  w_cols <- c("b_Intercept", "b_cos_sim_z", "b_ppmi_z", "b_ctx_overlap_z")
-  probs  <- c()
-  for (j in seq_len(nrow(feat_df))) {
-    x    <- matrix(c(1, feat_df$cos_sim_z[j], feat_df$ppmi_z[j], feat_df$ctx_overlap_z[j]), ncol = 1)
-    sigs <- c()
-    for (i in seq_len(nrow(post_draws))) {
-      w    <- matrix(unlist(post_draws[i, w_cols]), ncol = 1)
-      sigs <- c(sigs, sigmoid(w, x))
-    }
-    probs <- c(probs, mean(sigs))
-  }
+  # first tried brms predict() directly but it was really slow for 1000 candidates
+  # cand_df$score <- predict(model, newdata = cand_df, type = "response")[, "Estimate"]
 
-  feat_df$prob <- probs
-  feat_df <- feat_df[order(feat_df$prob, decreasing = TRUE), ]
-  head(feat_df[, c("candidate", "prob")], top_n)
+  # also tried looping over each candidate and each posterior draw but got stuck
+  # avg_probs <- c()
+  # for (j in seq_len(nrow(cand_df))) {
+  #   x    <- matrix(c(1, cand_df$cos_sim_z[j], cand_df$ppmi_z[j], cand_df$ctx_overlap_z[j]), ncol = 1)
+  #   sigs <- c()
+  #   for (i in seq_len(nrow(posterior))) {
+  #     w    <- matrix(unlist(posterior[i, param_cols]), ncol = 1)
+  #     sigs <- c(sigs, sigmoid(t(w) %*% x))
+  #   }
+  #   avg_probs <- c(avg_probs, mean(sigs))
+  # }
+
+  # switched to matrix multiply - same result, way faster
+  param_cols <- c("b_Intercept", "b_cos_sim_z", "b_ppmi_z", "b_ctx_overlap_z")
+  W          <- as.matrix(posterior[, param_cols])       # draws x 4
+  X          <- cbind(1, cand_df$cos_sim_z, cand_df$ppmi_z, cand_df$ctx_overlap_z)  # cands x 4
+  log_odds   <- X %*% t(W)                               # cands x draws
+  avg_probs  <- rowMeans(sigmoid(log_odds))              # average prob per candidate
+
+  cand_df$score <- avg_probs
+  cand_df <- cand_df[order(cand_df$score, decreasing = TRUE), ]
+  head(cand_df[, c("candidate", "score")], top_n)
 }
 
+# ──────────────────────────────────────────────
+# 8. DEMO
+# ──────────────────────────────────────────────
+
 demo_cases <- list(
-  list(target = "butter",      ctx = c("flour", "sugar", "eggs", "vanilla extract")),
-  list(target = "soy sauce",   ctx = c("garlic", "ginger", "sesame oil", "rice")),
-  list(target = "heavy cream", ctx = c("onion", "garlic", "pasta", "parmesan cheese"))
+  list(target = "butter",      context = c("flour", "sugar", "eggs", "vanilla extract")),
+  list(target = "soy sauce",   context = c("garlic", "ginger", "sesame oil", "rice")),
+  list(target = "heavy cream", context = c("onion", "garlic", "pasta", "parmesan cheese")),
+  list(target = "eggs",        context = c("flour", "sugar", "butter", "baking powder")),
+  list(target = "olive oil",   context = c("garlic", "tomatoes", "basil", "pasta"))
 )
 
 cat("\nDEMO: Top-5 substitutes\n")
 for (case in demo_cases) {
   cat(sprintf("\nSubstitutes for '%s':\n", case$target))
-  result <- get_substitutes(case$target, case$ctx, top_n = 5)
-  if (!is.null(result)) print(result)
+  ranked <- get_substitutes(case$target, case$context, top_n = 5)
+  if (!is.null(ranked)) print(ranked)
 }
 
-saveRDS(model, "bayesian_model.rds")
-cat("\nSaved: bayesian_model.rds\nDone.\n")
+cat("\nDone.\n")

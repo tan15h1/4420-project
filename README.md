@@ -121,7 +121,6 @@ streamlit run app.py
 | `cos_sim_top1000.npy / .csv` | Cosine similarity matrix (top-1000 ingredients) |
 | `ppmi_top1000.npy / .csv` | PPMI matrix (top-1000 ingredients) |
 | `vocab_top1000.txt` | Vocabulary list (top-1000 ingredients) |
-| `bayesian_model.rds` | Saved brms model object |
 
 ---
 
