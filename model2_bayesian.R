@@ -4,6 +4,8 @@
 # Uses outputs from model1_collaborative_filtering.py to fit a Bayesian
 # logistic regression that predicts whether ingredient B is a good
 # substitute for ingredient A given the recipe context.
+# Labels are derived from real recipe swap patterns (Jaccard similarity)
+# rather than PPMI neighbors, so features and labels are independent.
 
 library(brms)
 library(dplyr)
@@ -25,6 +27,12 @@ ppmi_mat <- as.matrix(read.csv("ppmi_top1000.csv",     header = FALSE))
 
 cat(sprintf("Vocabulary size: %d ingredients\n", V))
 
+# load cleaned recipes so labels come from real recipe patterns, not PPMI
+recipes_df <- read.csv("recipes_clean.csv", stringsAsFactors = FALSE)
+recipes_df$ingredients <- strsplit(recipes_df$ingredients, "\\|")
+recipes_df$tags        <- strsplit(recipes_df$tags,        "\\|")
+cat(sprintf("Recipes loaded: %d\n", nrow(recipes_df)))
+
 # ──────────────────────────────────────────────
 # 2. BUILD TRAINING PAIRS
 # ──────────────────────────────────────────────
@@ -33,7 +41,31 @@ cat(sprintf("Vocabulary size: %d ingredients\n", V))
 #   cos_sim     - cosine similarity between target and candidate
 #   ppmi        - PPMI score between target and candidate
 #   ctx_overlap - how well candidate fits the target's top-5 neighbors
-# Label = 1 if candidate is in top-20 most similar ingredients to target
+#
+# Label = 1 if Jaccard similarity between recipe TAG sets is high
+# Tags are a curated set of ~60 categories (cuisine, diet, dish type)
+# e.g. butter and margarine both in {desserts, baking, american} -> high Jaccard
+# e.g. butter and soy sauce: {desserts, baking} vs {asian, chinese} -> low Jaccard
+# Tag sets are independent of PPMI/cosine (ingredient co-occurrence) features
+
+# precompute which tags each ingredient appears with across all recipes
+ing_tags <- list()
+for (i in seq_len(nrow(recipes_df))) {
+  ings <- recipes_df$ingredients[[i]]
+  ings <- ings[ings %in% vocab]
+  tags <- recipes_df$tags[[i]]
+  if (length(ings) == 0 || length(tags) == 0) next
+  for (ing in ings) {
+    ing_tags[[ing]] <- union(ing_tags[[ing]], tags)
+  }
+}
+
+# Jaccard similarity between two tag sets
+# high = both ingredients appear in same types of recipes = likely substitutes
+jaccard <- function(a, b) {
+  if (length(a) == 0 || length(b) == 0) return(0)
+  length(intersect(a, b)) / length(union(a, b))
+}
 
 n_targets    <- 150
 n_candidates <- 35
@@ -41,24 +73,25 @@ target_ings  <- sample(vocab, n_targets)
 
 rows <- list()
 for (target in target_ings) {
-  target_idx <- ing2idx[[target]]
-
-  # find top-20 neighbors (positive class) and top-5 for context
-  sim_scores             <- cos_mat[target_idx, ]
-  sim_scores[target_idx] <- -1
-  top20_neighbors <- order(sim_scores, decreasing = TRUE)[1:20]
-  top5_neighbors  <- order(cos_mat[target_idx, ], decreasing = TRUE)[2:6]
+  target_idx     <- ing2idx[[target]]
+  top5_neighbors <- order(cos_mat[target_idx, ], decreasing = TRUE)[2:6]
 
   candidates <- sample(setdiff(seq_len(V), target_idx), n_candidates)
 
   for (cand_idx in candidates) {
+    cand        <- vocab[cand_idx]
+
+    # Jaccard between tag sets - how similar are the recipe types they appear in
+    # tags are independent of PPMI/cosine (which use ingredient co-occurrence)
+    context_sim <- jaccard(ing_tags[[target]], ing_tags[[cand]])
+
     rows[[length(rows) + 1]] <- data.frame(
       target      = target,
-      candidate   = vocab[cand_idx],
+      candidate   = cand,
       cos_sim     = cos_mat[target_idx, cand_idx],
       ppmi        = ppmi_mat[target_idx, cand_idx],
       ctx_overlap = mean(ppmi_mat[cand_idx, top5_neighbors]),
-      label       = as.integer(cand_idx %in% top20_neighbors),
+      context_sim = context_sim,
       stringsAsFactors = FALSE
     )
   }
@@ -67,6 +100,13 @@ for (target in target_ings) {
 train_df <- bind_rows(rows) %>%
   filter(!is.na(cos_sim), !is.na(ppmi), !is.na(ctx_overlap)) %>%
   distinct(target, candidate, .keep_all = TRUE)
+
+# Use 90th percentile as threshold so positive rate is always ~10%
+# Fixed threshold of 0.3 was unreliable - context set sizes vary widely across vocab
+jaccard_thresh <- quantile(train_df$context_sim, 0.90)
+cat(sprintf("Jaccard threshold (90th pct): %.4f\n", jaccard_thresh))
+train_df$label <- as.integer(train_df$context_sim >= jaccard_thresh)
+train_df        <- select(train_df, -context_sim)
 
 cat(sprintf("Training pairs: %d\n", nrow(train_df)))
 cat(sprintf("Positive rate: %.4f\n", mean(train_df$label)))
