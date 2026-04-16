@@ -4,10 +4,6 @@ Tanishi Datta & Shruthi Palaniappan
 
 Parses RAW_recipes.csv (non-standard format), cleans ingredient and tag data,
 and saves a clean CSV that both models can load directly.
-
-Output: recipes_clean.csv
-  - ingredients: list of cleaned ingredients
-  - tags: list of cleaned tags
 """
 
 import re
@@ -20,7 +16,7 @@ with open("RAW_recipes.csv", "r", errors="replace") as f:
     content = f.read()
 
 # Ingredients: each entry looks like: ""['ing1', 'ing2', ...]"",N"
-# Tags: the submitted date (e.g. 9/16/05) always appears right before the tags list
+# Tags: the submitted date always appears right before the tags list
 ing_pattern = re.compile(r'""(\[[^\]]*\])"",(\d+)"')
 tag_pattern = re.compile(r',\d{1,2}/\d{1,2}/\d{2},""(\[[^\]]*\])""')
 
@@ -29,19 +25,15 @@ tag_matches = list(tag_pattern.finditer(content))
 print(f"  Found {len(ing_matches)} ingredient lists, {len(tag_matches)} tag lists")
 
 # Pair each ingredient list with the nearest preceding tags list
-# Both lists are already sorted by position in the file, so we walk
-# through them together in one pass (O(n)) instead of searching each time
 recipes = []
 tag_idx = 0
 
 for ing_match in ing_matches:
     ing_pos = ing_match.start()
 
-    # Advance tag_idx as long as the next tag still comes before this ingredient
     while tag_idx + 1 < len(tag_matches) and tag_matches[tag_idx + 1].start() < ing_pos:
         tag_idx += 1
 
-    # Make sure the current tag actually precedes this ingredient
     if tag_matches[tag_idx].start() >= ing_pos:
         continue
 
@@ -129,7 +121,7 @@ print(f"\nAfter cleaning: {len(recipes)} recipes")
 # ──────────────────────────────────────────────
 # 3. SAVE AS DATAFRAME
 # ──────────────────────────────────────────────
-# Pickle preserves the DataFrame exactly - lists stay as lists, no parsing needed on load
+# Pickle preserves the DataFrame exactly 
 # Load it back with: df = pd.read_pickle("recipes_clean.pkl")
 
 df = pd.DataFrame(recipes)
