@@ -376,4 +376,56 @@ for (case in demo_cases) {
   if (!is.null(ranked)) print(ranked)
 }
 
+# build table data from demo results
+tbl_rows <- list()
+for (case in demo_cases) {
+  ranked <- get_substitutes(case$target, case$context, top_n = 3)
+  if (!is.null(ranked)) {
+    tbl_rows[[length(tbl_rows) + 1]] <- c(
+      tools::toTitleCase(case$target),
+      tools::toTitleCase(ranked$candidate[1]),
+      tools::toTitleCase(ranked$candidate[2]),
+      tools::toTitleCase(ranked$candidate[3])
+    )
+  }
+}
+tbl_df   <- as.data.frame(do.call(rbind, tbl_rows), stringsAsFactors = FALSE)
+col_headers <- c("Ingredient", "Substitute 1", "Substitute 2", "Substitute 3")
+colnames(tbl_df) <- col_headers
+
+n_rows <- nrow(tbl_df)
+n_cols <- ncol(tbl_df)
+
+# header row + data rows in long format for ggplot
+header_df <- data.frame(
+  x = 1:n_cols, y = n_rows + 1,
+  label = col_headers, stringsAsFactors = FALSE
+)
+data_df <- data.frame(
+  x     = rep(1:n_cols, n_rows),
+  y     = rep(n_rows:1, each = n_cols),
+  label = as.vector(t(tbl_df)),
+  stringsAsFactors = FALSE
+)
+plot_df <- rbind(header_df, data_df)
+
+# styling: dark blue for header row and first column, white elsewhere
+NAVY  <- "#4C72B0"
+plot_df$fill       <- ifelse(plot_df$y == n_rows + 1 | plot_df$x == 1, NAVY, "white")
+plot_df$text_color <- ifelse(plot_df$fill == NAVY, "white", "#1A1A1A")
+plot_df$bold       <- ifelse(plot_df$x == 1 | plot_df$y == n_rows + 1, "bold", "plain")
+
+p_table <- ggplot(plot_df, aes(x = x, y = y)) +
+  geom_tile(aes(fill = fill), color = "gray80", linewidth = 0.5) +
+  geom_text(aes(label = label, color = text_color, fontface = bold), size = 4) +
+  scale_fill_identity() +
+  scale_color_identity() +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_void() +
+  theme(plot.margin = margin(2, 2, 2, 2))
+
+ggsave("plot_substitutes_table.png", p_table, width = 12, height = 2.8, dpi = 150)
+cat("Saved: plot_substitutes_table.png\n")
+
 cat("\nDone.\n")

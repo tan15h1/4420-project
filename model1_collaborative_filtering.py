@@ -390,10 +390,12 @@ ppmi_top     = ppmi[np.ix_(top1000_idxs, top1000_idxs)]
 
 np.save("cos_sim_top1000.npy", cos_sim_top)
 np.save("ppmi_top1000.npy",    ppmi_top)
+pd.DataFrame(cos_sim_top).to_csv("cos_sim_top1000.csv", index=False, header=False)
+pd.DataFrame(ppmi_top).to_csv("ppmi_top1000.csv",       index=False, header=False)
 with open("vocab_top1000.txt", "w") as f:
     for ing in top1000_ings:
         f.write(ing + "\n")
-print("\nSaved: cos_sim_top1000.npy, ppmi_top1000.npy, vocab_top1000.txt")
+print("\nSaved: cos_sim_top1000.npy/.csv, ppmi_top1000.npy/.csv, vocab_top1000.txt")
 
 print("\n" + "="*55)
 print("TOP-1000 SIMILARITY MATRIX SUMMARY")
